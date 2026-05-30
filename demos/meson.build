@@ -86,6 +86,15 @@ if sdl.found()
       c_args: '-DUSE_GL',
     )
   endif
+
+  if components.get('metal')
+    conf_demos.set('HAVE_SDL_METAL', true)
+    apis += static_library('sdl-mtl',
+      dependencies: [libplacebo, sdl],
+      sources: 'window_sdl.c',
+      c_args: '-DUSE_MTL',
+    )
+  endif
 endif
 
 configure_file(
