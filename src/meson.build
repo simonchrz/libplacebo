@@ -64,6 +64,7 @@ headers = [
   'gamut_mapping.h',
   'gpu.h',
   'log.h',
+  'metal.h',
   'opengl.h',
   'options.h',
   'renderer.h',
