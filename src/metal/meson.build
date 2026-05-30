@@ -14,6 +14,9 @@ if metal_build.allowed()
   add_languages('objc', native: false, required: true)
   # The backend is written in manual-retain-release Objective-C; never ARC.
   add_project_arguments('-fno-objc-arc', language: 'objc')
+  sources += [
+    'metal/formats.m',
+  ]
   build_deps += dependency('appleframeworks',
     modules: ['Metal', 'Foundation', 'QuartzCore'])
   build_deps += spvc
