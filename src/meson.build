@@ -158,6 +158,7 @@ subdir('glsl')
 subdir('d3d11')
 subdir('opengl')
 subdir('vulkan')
+subdir('metal')
 
 lcms = dependency('lcms2', version: '>=2.9', required: get_option('lcms'))
 components.set('lcms', lcms.found())
@@ -167,14 +168,14 @@ if lcms.found()
 endif
 
 # Check to see if libplacebo built this way is sane
-if not (components.get('vulkan') or components.get('opengl') or components.get('d3d11'))
+if not (components.get('vulkan') or components.get('opengl') or components.get('d3d11') or components.get('metal'))
   warning('Building without any graphics API. libplacebo built this way still ' +
           'has some limited use (e.g. generating GLSL shaders), but most of ' +
           'its functionality will be missing or impaired!')
 endif
 
 has_spirv = components.get('shaderc') or components.get('glslang')
-needs_spirv = components.get('vulkan') or components.get('d3d11')
+needs_spirv = components.get('vulkan') or components.get('d3d11') or components.get('metal')
 if needs_spirv and not has_spirv
   warning('Building without any GLSL compiler (shaderc, glslang), but with ' +
           'APIs required that require one (vulkan, d3d11). This build is very ' +
