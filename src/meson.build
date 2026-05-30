@@ -175,6 +175,10 @@ if not (components.get('vulkan') or components.get('opengl') or components.get('
           'its functionality will be missing or impaired!')
 endif
 
+if components.get('metal')
+  tests += 'metal.m'
+endif
+
 has_spirv = components.get('shaderc') or components.get('glslang')
 needs_spirv = components.get('vulkan') or components.get('d3d11') or components.get('metal')
 if needs_spirv and not has_spirv
@@ -303,7 +307,7 @@ pkg.generate(
 ### Testing
 tdep_static = declare_dependency(
     dependencies: build_deps,
-    include_directories: [ inc, include_directories('.') ],
+    include_directories: [ inc, include_directories('.'), inc_dirs ],
     compile_args: '-DPL_STATIC'
     # TODO: Define objects here once Meson 1.1.0 is ok to use
     # objects: lib.extract_all_objects(recursive: false)
