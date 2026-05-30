@@ -18,6 +18,7 @@ if metal_build.allowed()
     'metal/formats.m',
     'metal/gpu_tex.m',
     'metal/gpu_pass.m',
+    'metal/gpu.m',
   ]
   build_deps += dependency('appleframeworks',
     modules: ['Metal', 'Foundation', 'QuartzCore'])
