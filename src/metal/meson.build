@@ -19,6 +19,8 @@ if metal_build.allowed()
     'metal/gpu_tex.m',
     'metal/gpu_pass.m',
     'metal/gpu.m',
+    'metal/metal.m',
+    'metal/swapchain.m',
   ]
   build_deps += dependency('appleframeworks',
     modules: ['Metal', 'Foundation', 'QuartzCore'])
