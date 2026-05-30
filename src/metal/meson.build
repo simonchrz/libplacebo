@@ -16,6 +16,7 @@ if metal_build.allowed()
   add_project_arguments('-fno-objc-arc', language: 'objc')
   sources += [
     'metal/formats.m',
+    'metal/gpu_tex.m',
   ]
   build_deps += dependency('appleframeworks',
     modules: ['Metal', 'Foundation', 'QuartzCore'])
