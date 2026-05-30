@@ -69,4 +69,5 @@ enum {
     CACHE_KEY_VK_PIPE   = UINT64_C(0x4bdab2817ad02ad4), // VkPipelineCache
     CACHE_KEY_GL_PROG   = UINT64_C(0x4274c309f4f0477b), // GL_ARB_get_program_binary
     CACHE_KEY_D3D_DXBC  = UINT64_C(0xae98785f760f768c), // DXBC bytecode
+    CACHE_KEY_METAL_MSL = UINT64_C(0x6d6574616c4d5332), // MSL + threadgroup dims (v2)
 };
