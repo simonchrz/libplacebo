@@ -1,5 +1,5 @@
 gpu_tests = [
-  'vulkan.c', 'opengl_surfaceless.c', 'd3d11.c', 'dummy.c'
+  'vulkan.c', 'opengl_surfaceless.c', 'd3d11.c', 'dummy.c', 'metal.m'
 ]
 
 ts = []
