@@ -23,6 +23,7 @@
 
 #include "gpu.h"
 #include "../cache.h"
+#include "../pl_clock.h"   // pl_clock_now/diff für Compile-Time-Tracking
 
 #define METAL_VERTEX_BUF_SLOT     30   // MSL [[buffer(30)]] for vertex stream
 #define METAL_PUSH_CONST_SLOT     28   // MSL [[buffer(28)]] for push constants
@@ -164,6 +165,11 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
     struct pl_gpu_metal *p = PL_PRIV(gpu);
     unsigned msl_version = mtl_msl_version();
 
+    // Compile-Time-Tracking: per-Sub-Step-Timings (0 = übersprungen, z.B. bei
+    // Cache-Hit). Eine PL_INFO-Summary-Zeile pro Stage vor dem return.
+    pl_clock_t _t;
+    double spirv_ms = 0, cross_ms = 0, mtllib_ms = 0;
+
     // The expensive part below is GLSL → SPIR-V (shaderc) → MSL (SPIRV-Cross),
     // ~100-300ms per stage and ~15 stages on a cold renderer. Cache the emitted
     // MSL keyed by the GLSL source, so a pl_cache loaded from disk by the
@@ -189,13 +195,16 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
 
     if (!msl) {
     // GLSL → SPIR-V (libplacebo)
+    _t = pl_clock_now();
     st->spv = pl_spirv_compile_glsl(p->spirv, tmp, gpu->glsl, stage_type, glsl);
     if (!st->spv.len) {
         PL_ERR(gpu, "metal: GLSL → SPIR-V failed");
         return false;
     }
+    spirv_ms = pl_clock_diff(pl_clock_now(), _t) * 1e3;
 
     // SPIR-V → MSL (SPIRV-Cross)
+    _t = pl_clock_now();
     if (spvc_context_create(&st->sc_ctx) != SPVC_SUCCESS) {
         PL_ERR(gpu, "metal: spvc_context_create failed");
         return false;
@@ -289,13 +298,16 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
         st->tg[i] = spvc_compiler_get_execution_mode_argument_by_index(
             st->sc_compiler, SpvExecutionModeLocalSize, i);
     msl = st->msl;
+    cross_ms = pl_clock_diff(pl_clock_now(), _t) * 1e3;
     }  // end cache-miss transpile
 
     // MSL → MTLLibrary → MTLFunction("main0")
     NSError *err = nil;
     NSString *src = [[NSString alloc] initWithUTF8String:msl];
     MTLCompileOptions *co = [[MTLCompileOptions alloc] init];
+    _t = pl_clock_now();
     st->library = [mtl_device(gpu) newLibraryWithSource:src options:co error:&err];
+    mtllib_ms = pl_clock_diff(pl_clock_now(), _t) * 1e3;
     [co release];
     [src release];
     if (!st->library) {
@@ -323,6 +335,11 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
         }
     }
     pl_cache_obj_free(&obj);             // no-op after set; frees the loaded blob on hit
+
+    const char *sname = stage_type == GLSL_SHADER_VERTEX   ? "vert"
+                      : stage_type == GLSL_SHADER_FRAGMENT ? "frag" : "comp";
+    PL_INFO(gpu, "metal-compile: stage=%s cache=%s spirv=%.1fms cross=%.1fms mtllib=%.1fms",
+            sname, from_cache ? "hit" : "miss", spirv_ms, cross_ms, mtllib_ms);
     return true;
 }
 
@@ -387,8 +404,11 @@ pl_pass mtl_pass_create(pl_gpu gpu, const struct pl_pass_params *params)
         }
 
         NSError *err = nil;
+        pl_clock_t _tp = pl_clock_now();
         id<MTLRenderPipelineState> pso =
             [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        PL_INFO(gpu, "metal-compile: pso=render %.1fms",
+                pl_clock_diff(pl_clock_now(), _tp) * 1e3);
         [pd release];
         if (!pso) {
             PL_ERR(gpu, "metal: newRenderPipelineState failed: %s",
@@ -404,10 +424,13 @@ pl_pass mtl_pass_create(pl_gpu gpu, const struct pl_pass_params *params)
         MTLComputePipelineDescriptor *cd = [[MTLComputePipelineDescriptor alloc] init];
         cd.computeFunction = comp.function;
         NSError *err = nil;
+        pl_clock_t _tp = pl_clock_now();
         id<MTLComputePipelineState> pso =
             [dev newComputePipelineStateWithDescriptor:cd
                                                options:MTLPipelineOptionNone
                                             reflection:nil error:&err];
+        PL_INFO(gpu, "metal-compile: pso=compute %.1fms",
+                pl_clock_diff(pl_clock_now(), _tp) * 1e3);
         [cd release];
         if (!pso) {
             PL_ERR(gpu, "metal: newComputePipelineState failed: %s",
