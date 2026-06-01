@@ -122,3 +122,9 @@ int     mtl_desc_namespace(pl_gpu, enum pl_desc_type type);
 pl_pass mtl_pass_create(pl_gpu, const struct pl_pass_params *);
 void    mtl_pass_destroy(pl_gpu, pl_pass);
 void    mtl_pass_run(pl_gpu, const struct pl_pass_run_params *);
+void    mtl_gpu_finish(pl_gpu);
+void    mtl_gpu_flush(pl_gpu);
+
+// Attach GPU timestamping for `timer` to `cb` before commit (no-op if NULL).
+// Defined in gpu.m alongside the timer ring; called from mtl_pass_run.
+void    mtl_timer_attach(pl_timer timer, id<MTLCommandBuffer> cb);
