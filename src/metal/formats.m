@@ -19,12 +19,13 @@
  * Maps MTLPixelFormat → pl_fmt. Per-format backend-private holds the
  * MTLPixelFormat.
  *
- * Scope: component-uniform formats (every component the same byte size) so
- * texel_size / host_bits derive cleanly. Packed formats (rgb10_a2, rgb565)
- * need bespoke host_bits and land with the texture-upload phase.
+ * Most entries are component-uniform (every component the same byte size) so
+ * texel_size / host_bits derive from comp_size. Packed formats (rgb10a2,
+ * bgr565) carry an explicit per-component bit layout in `packed_bits`.
  */
 
 #import <Metal/Metal.h>
+#import <TargetConditionals.h>
 
 #include "gpu.h"
 
@@ -33,12 +34,14 @@ struct mtl_fmt_desc {
     MTLPixelFormat    mtl;
     enum pl_fmt_type  type;
     int               num_comp;
-    int               comp_size;    // bytes per component (uniform)
-    bool              bgr;          // host byte order is B,G,R(,A)
+    int               comp_size;    // bytes per component (uniform formats; 0 if packed)
+    bool              bgr;          // host component order is B,G,R(,A)
     bool              linear;       // filterable
     bool              renderable;
     bool              storable;     // usable as storage image
     bool              vertex_only;  // no MTL texture format; vertex attrib only
+    int8_t            packed_bits[4]; // per-component bit depths for packed
+                                      // formats (component order); {0} = uniform
 };
 
 static const struct mtl_fmt_desc mtl_fmts[] = {
@@ -74,6 +77,19 @@ static const struct mtl_fmt_desc mtl_fmts[] = {
     // exist), but valid as vertex attributes. vertex_only → VERTEX cap only.
     { "rgb32f",   MTLPixelFormatInvalid,     PL_FMT_FLOAT, 3, 4, false, false, false, false, true },
     { "rgb16f",   MTLPixelFormatInvalid,     PL_FMT_FLOAT, 3, 2, false, false, false, false, true },
+    // Packed: components share one machine word, non-uniform widths. comp_size
+    // is 0 — the layout comes from packed_bits (LSB-first, component order).
+    // rgb10a2 (10/10/10/2) is the HDR intermediate; matches the natural R,G,B,A
+    // order so no bgr swap. Renderable + filterable on all supported families,
+    // but not a valid storage-image format → storable stays false.
+    { "rgb10a2",  MTLPixelFormatRGB10A2Unorm, PL_FMT_UNORM, 4, 0, false, true, true, false, false, {10, 10, 10, 2} },
+#if TARGET_OS_IPHONE || TARGET_OS_TV
+    // bgr565 (5/6/5) only exists as an MTLPixelFormat on iOS/tvOS — the enum is
+    // unavailable on the macOS SDK, so guard it out there. B5G6R5 stores R in
+    // the low bits → bgr component order (sample_order 2,1,0), same layout the
+    // d3d11 backend uses for its "bgr565".
+    { "bgr565",   MTLPixelFormatB5G6R5Unorm,  PL_FMT_UNORM, 3, 0, true,  true, true, false, false, {5, 6, 5} },
+#endif
 };
 
 #define METAL_NUM_FORMATS (sizeof(mtl_fmts) / sizeof(mtl_fmts[0]))
@@ -86,17 +102,23 @@ void mtl_setup_formats(struct pl_gpu_t *gpu)
         struct mtl_format_priv *fp = PL_PRIV(fmt);
         fp->mtl = d->mtl;
 
+        bool packed = d->packed_bits[0] != 0;
+
         fmt->name           = d->name;
         fmt->signature      = (uint64_t) d->mtl;   // MTLPixelFormat is stable+unique
         fmt->type           = d->type;
         fmt->num_components  = d->num_comp;
-        fmt->internal_size  = d->num_comp * d->comp_size;
+        int total_bits = 0;
+        for (int c = 0; c < d->num_comp; c++)
+            total_bits += packed ? d->packed_bits[c] : d->comp_size * 8;
+        fmt->internal_size  = (total_bits + 7) / 8;
         fmt->texel_size     = fmt->internal_size;
         fmt->texel_align    = 1;
         for (int c = 0; c < d->num_comp; c++) {
-            fmt->component_depth[c] = d->comp_size * 8;
-            fmt->host_bits[c]       = d->comp_size * 8;
-            // bgr* swaps the R and B host byte slots (B,G,R,A)
+            int bits = packed ? d->packed_bits[c] : d->comp_size * 8;
+            fmt->component_depth[c] = bits;
+            fmt->host_bits[c]       = bits;
+            // bgr* swaps the R and B component slots (B,G,R,A)
             fmt->sample_order[c]    = (d->bgr && c < 3) ? (2 - c) : c;
         }
 
@@ -116,8 +138,9 @@ void mtl_setup_formats(struct pl_gpu_t *gpu)
             }
             if (d->storable && gpu->glsl.compute)
                 caps |= PL_FMT_CAP_STORABLE;
-            // Vertex use needs a glsl_type (set below); non-bgr numeric only.
-            if (!d->bgr && d->type != PL_FMT_UINT)
+            // Vertex use needs a plain (non-packed) layout + glsl_type; non-bgr
+            // numeric only. Packed formats have no matching MTLVertexFormat.
+            if (!d->bgr && d->type != PL_FMT_UINT && !packed)
                 caps |= PL_FMT_CAP_VERTEX;
         }
         fmt->caps = caps;
