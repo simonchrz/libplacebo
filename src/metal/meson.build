@@ -14,6 +14,12 @@ if metal_build.allowed()
   add_languages('objc', native: false, required: true)
   # The backend is written in manual-retain-release Objective-C; never ARC.
   add_project_arguments('-fno-objc-arc', language: 'objc')
+  # The shared C warning policy (top-level meson.build `c_opts`) is only
+  # registered for language 'c', so the .m files would otherwise warn on things
+  # the rest of the tree mutes (e.g. -Wno-sign-compare for PL_ARRAY_APPEND_RAW,
+  # -Wno-missing-field-initializers for the positional format table). Apply the
+  # same policy to Objective-C so the backend builds as cleanly as the C sources.
+  add_project_arguments(c_opts, language: 'objc')
   sources += [
     'metal/formats.m',
     'metal/gpu_tex.m',
