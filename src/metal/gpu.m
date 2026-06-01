@@ -23,6 +23,9 @@
 
 #import <Metal/Metal.h>
 
+#include <stdatomic.h>
+#include <sched.h>
+
 #include "gpu.h"
 
 static const struct pl_gpu_fns pl_fns_metal;
@@ -56,6 +59,82 @@ void mtl_gpu_finish(pl_gpu gpu)
     [cb waitUntilCompleted];
 }
 
+// Kick off all committed work without blocking. Metal commits eagerly, so this
+// is mostly a no-op flush point; we still push an empty cb so any callers
+// relying on a submission barrier (e.g. pl_gpu_flush before a present on a
+// separate queue) get one.
+void mtl_gpu_flush(pl_gpu gpu)
+{
+    [[mtl_queue(gpu) commandBuffer] commit];
+}
+
+// ---- GPU timers ----------------------------------------------------------
+//
+// Metal exposes per-command-buffer GPU timestamps (GPUStartTime/GPUEndTime, in
+// seconds) once the buffer has completed — no query pool needed. We attach a
+// completion handler per timed pass that publishes the elapsed nanoseconds into
+// a small lock-free ring; pl_timer_query drains it. Completion handlers run on
+// an arbitrary thread, so the ring is a single-consumer / multi-producer SPSC-
+// style buffer keyed on the slot value (0 == empty), and `pending` keeps the
+// timer alive until every in-flight handler that captured it has run.
+
+#define MTL_TIMER_RING 8
+
+struct pl_timer_t {
+    _Atomic(uint64_t) ring[MTL_TIMER_RING]; // elapsed ns; 0 == empty slot
+    _Atomic(uint_fast32_t) widx;            // producer slot allocator
+    uint_fast32_t ridx;                     // consumer cursor (single-threaded)
+    _Atomic(int) pending;                   // handlers still referencing `timer`
+};
+
+static pl_timer mtl_timer_create(pl_gpu gpu)
+{
+    (void) gpu;
+    pl_timer t = pl_zalloc_ptr(NULL, t);
+    return t;
+}
+
+static void mtl_timer_destroy(pl_gpu gpu, pl_timer t)
+{
+    (void) gpu;
+    // A completion handler may still hold `t`. These fire shortly after their
+    // command buffer completes; timers are destroyed at teardown (after the
+    // last present), so this drains immediately in practice rather than spins.
+    while (atomic_load_explicit(&t->pending, memory_order_acquire))
+        sched_yield();
+    pl_free(t);
+}
+
+static uint64_t mtl_timer_query(pl_gpu gpu, pl_timer t)
+{
+    (void) gpu;
+    uint_fast32_t i = t->ridx % MTL_TIMER_RING;
+    uint64_t ns = atomic_load_explicit(&t->ring[i], memory_order_acquire);
+    if (!ns)
+        return 0; // nothing ready at the read cursor
+    atomic_store_explicit(&t->ring[i], 0, memory_order_relaxed); // mark consumed
+    t->ridx++;
+    return ns;
+}
+
+// Attach GPU timestamping for `timer` to `cb` (no-op if timer is NULL). Called
+// from mtl_pass_run just before commit.
+void mtl_timer_attach(pl_timer t, id<MTLCommandBuffer> cb)
+{
+    if (!t)
+        return;
+    atomic_fetch_add_explicit(&t->pending, 1, memory_order_relaxed);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull c) {
+        double dt = c.GPUEndTime - c.GPUStartTime;
+        uint64_t ns = dt > 0 ? (uint64_t) (dt * 1e9) : 1; // never publish 0
+        uint_fast32_t i = atomic_fetch_add_explicit(&t->widx, 1,
+                                                    memory_order_relaxed)
+                          % MTL_TIMER_RING;
+        atomic_store_explicit(&t->ring[i], ns, memory_order_release);
+        atomic_fetch_sub_explicit(&t->pending, 1, memory_order_release);
+    }];
+}
+
 // ---- texture / buffer impls live in gpu_tex.m, pass impls in gpu_pass.m ----
 
 static const struct pl_gpu_fns pl_fns_metal = {
@@ -77,6 +156,10 @@ static const struct pl_gpu_fns pl_fns_metal = {
     .pass_create    = mtl_pass_create,
     .pass_destroy   = mtl_pass_destroy,
     .pass_run       = mtl_pass_run,
+    .timer_create   = mtl_timer_create,
+    .timer_destroy  = mtl_timer_destroy,
+    .timer_query    = mtl_timer_query,
+    .gpu_flush      = mtl_gpu_flush,
     .gpu_finish     = mtl_gpu_finish,
     .gpu_is_failed  = mtl_gpu_is_failed,
 };

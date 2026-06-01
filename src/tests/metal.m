@@ -128,6 +128,10 @@ int main()
         REQUIRE(pass);
         printf("metal: render pass created (GLSL→MSL→PSO ok)\n");
 
+        // Time the pass with a pl_timer (GPU timestamps via completion handler).
+        pl_timer timer = pl_timer_create(gpu);
+        REQUIRE(timer);
+
         // Oversized triangle covering the whole [-1,1] clip square.
         static const float verts[6] = { -1, -1,  3, -1,  -1, 3 };
         pl_pass_run(gpu, pl_pass_run_params(
@@ -137,12 +141,26 @@ int main()
             .vertex_data = verts,
             .viewport = {0, 0, W, H},
             .scissors = {0, 0, W, H},
+            .timer = timer,
         ));
 
         uint8_t px[W * H * 4];
         REQUIRE(pl_tex_download(gpu, pl_tex_transfer_params(
             .tex = target, .ptr = px,
         )));
+
+        // The completion handler that publishes the timing fires asynchronously
+        // shortly after the command buffer completes — drain with a bounded poll.
+        pl_gpu_finish(gpu);
+        uint64_t gpu_ns = 0;
+        for (int i = 0; i < 10000 && !gpu_ns; i++)
+            gpu_ns = pl_timer_query(gpu, timer);
+        printf("metal: render pass GPU time = %llu ns\n",
+               (unsigned long long) gpu_ns);
+        REQUIRE(gpu_ns > 0);
+        // Ring is drained: the next query yields no further result.
+        REQUIRE(pl_timer_query(gpu, timer) == 0);
+        pl_timer_destroy(gpu, &timer);
         // Expect ~ (0.25, 0.5, 0.75, 1.0) * 255 = (64, 128, 191, 255).
         printf("metal: rendered pixel[0] = (%d,%d,%d,%d) expect ~(64,128,191,255)\n",
                px[0], px[1], px[2], px[3]);

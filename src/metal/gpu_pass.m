@@ -644,6 +644,6 @@ void mtl_pass_run(pl_gpu gpu, const struct pl_pass_run_params *params)
         [enc endEncoding];
     }
 
-    if (params->timer) { /* TODO: MTLCommandBuffer GPU timestamps */ }
+    mtl_timer_attach(params->timer, cb);
     [cb commit];
 }
