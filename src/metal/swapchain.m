@@ -27,10 +27,11 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-#include <libplacebo/metal.h>
-
+// Interne Header VOR <libplacebo/metal.h> (PL_DEPRECATED_IN-Redefine, siehe gpu.h).
 #include "gpu.h"
 #include "../swapchain.h"
+
+#include <libplacebo/metal.h>
 
 struct pl_sw_metal {
     struct pl_sw_fns impl;
