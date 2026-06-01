@@ -22,8 +22,12 @@
 
 #import <Metal/Metal.h>
 
-#include "../gpu.h"
+// common.h MUSS vor ../gpu.h kommen: es definiert PL_DEPRECATED_IN leer, bevor es
+// <libplacebo/config.h> zieht (damit interner Code keine deprecation-Warnings
+// bekommt). Zieht ../gpu.h zuerst config.h mit der echten __attribute__-Variante,
+// gibt's eine Makro-Redefinition (unter --werror fatal, z.B. im macOS-CI-Job).
 #include "../common.h"
+#include "../gpu.h"
 #include "../glsl/spirv.h"
 #include <libplacebo/swapchain.h>
 

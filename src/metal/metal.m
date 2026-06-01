@@ -23,10 +23,13 @@
 
 #import <Metal/Metal.h>
 
-#include <libplacebo/metal.h>
-
+// Interne Header (→ common.h, das PL_DEPRECATED_IN leer setzt) VOR dem Public-
+// Header <libplacebo/metal.h>, sonst zieht der config.h mit der echten
+// __attribute__-Variante zuerst → PL_DEPRECATED_IN-Redefinition (--werror).
 #include "gpu.h"
 #include "common.h"
+
+#include <libplacebo/metal.h>
 
 pl_metal pl_metal_create(pl_log log, const struct pl_metal_params *params)
 {
