@@ -29,10 +29,6 @@ if glslang_req.auto() and shaderc.found()
 
 elif not glslang_req.disabled()
 
-  glslang_deps = [
-    cxx.find_library('glslang-default-resource-limits', required: false)
-  ]
-
   # meson doesn't respect generator expressions in INTERFACE_LINK_LIBRARIES
   # https://github.com/mesonbuild/meson/issues/8232
   # TODO: Use the following once it's fixed
@@ -43,6 +39,12 @@ elif not glslang_req.disabled()
   if vulkan_sdk != ''
     vulkan_lib_dirs += [vulkan_sdk / 'lib']
   endif
+
+  glslang_deps = [
+    cxx.find_library('glslang-default-resource-limits', required: false,
+                     dirs: vulkan_lib_dirs)
+  ]
+
   prefer_static = get_option('prefer_static')
   found_lib = false
   foreach arg : [[prefer_static, false], [not prefer_static, glslang_req]]
@@ -59,7 +61,8 @@ elif not glslang_req.disabled()
 
     # Glslang 15.0.0 moved some code around, add also linking to glslang, while
     # this is not needed for older versions, it will still work.
-    glslang_deps += cxx.find_library('glslang', required: required, static: static)
+    glslang_deps += cxx.find_library('glslang', required: required, static: static,
+                                     dirs: vulkan_lib_dirs)
 
     if static
       glslang_deps += [
