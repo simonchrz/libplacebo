@@ -109,6 +109,47 @@ macos:
         - ninja -C build
         - cd build && meson test -t 5 -v --num-processes=1
 
+# Metal backend on the M1 runner (macos-xcode26) — native Apple Silicon with a
+# real GPU, so test.metal.m actually runs (buffer/texture/shader round-trips)
+# instead of skipping. The runner has neither SPIRV-Cross (SPIR-V→MSL) nor a
+# GLSL→SPIR-V compiler, and Homebrew is not writable by the CI user, so both are
+# built from source: SPIRV-Cross (found via pkg-config) and glslang (found via
+# -Dvulkan-sdk + CPATH). min-version 10.15 for MTLCommandBuffer.GPUStartTime/EndTime.
+macos-metal:
+    stage: compile
+    tags:
+        - macos-xcode26
+    variables:
+        SPVC_PREFIX: $CI_PROJECT_DIR/spvc
+        GLSLANG_PREFIX: $CI_PROJECT_DIR/glslang-prefix
+    script:
+        - git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Cross.git spvc-src
+        - cmake -S spvc-src -B spvc-src/build -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_INSTALL_PREFIX=$SPVC_PREFIX -DSPIRV_CROSS_SHARED=ON
+                -DSPIRV_CROSS_CLI=OFF -DSPIRV_CROSS_ENABLE_TESTS=OFF
+        - cmake --build spvc-src/build --target install --parallel
+        - git clone --depth 1 https://github.com/KhronosGroup/glslang.git glslang-src
+        - cmake -S glslang-src -B glslang-src/build -DCMAKE_BUILD_TYPE=Release
+                -DENABLE_OPT=OFF -DCMAKE_INSTALL_PREFIX=$GLSLANG_PREFIX
+                -DBUILD_SHARED_LIBS=OFF -DGLSLANG_TESTS=OFF -DENABLE_GLSLANG_BINARIES=OFF
+        - cmake --build glslang-src/build --target install --parallel
+        - export PKG_CONFIG_PATH="$SPVC_PREFIX/lib/pkgconfig"
+        - export CPATH="$GLSLANG_PREFIX/include"
+        - python3 -m venv venv
+        - source venv/bin/activate
+        - pip install meson
+        - meson build --buildtype release
+                      -Ddefault_library=both
+                      -Dtests=true
+                      -Ddebug-abort=true
+                      -Dmetal=enabled
+                      -Dglslang=enabled
+                      -Dvulkan-sdk=$GLSLANG_PREFIX
+                      -Dc_args='-mmacosx-version-min=10.15 -Wunguarded-availability'
+                      --werror
+        - ninja -C build
+        - cd build && meson test -t 5 -v --num-processes=1
+
 scan:
     image: $IMAGE_UBUNTU_NOBLE
     stage: compile
