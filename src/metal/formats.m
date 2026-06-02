@@ -94,8 +94,31 @@ static const struct mtl_fmt_desc mtl_fmts[] = {
 
 #define METAL_NUM_FORMATS (sizeof(mtl_fmts) / sizeof(mtl_fmts[0]))
 
+// Minimum MTLReadWriteTextureTier that supports read-write access for this
+// format, or 0 if Metal never allows read-write on it. Tier 1 covers R32
+// (float/uint/sint); tier 2 additionally covers R8/RGBA8 (any), R16/RGBA16
+// (float/uint/sint, NOT unorm) and RGBA32. Only R and RGBA layouts qualify —
+// RG, BGRA, packed and vertex-only formats are never read-write.
+static int mtl_readwrite_tier(const struct mtl_fmt_desc *d)
+{
+    if (d->packed_bits[0] != 0 || d->vertex_only || d->bgr)
+        return 0;
+    if (d->num_comp != 1 && d->num_comp != 4)
+        return 0;
+    switch (d->comp_size) {
+    case 1:  return 2;                                   // r8 / rgba8 (unorm/uint/sint)
+    case 2:  return d->type == PL_FMT_UNORM ? 0 : 2;     // r16f/rgba16f…, not 16-unorm
+    case 4:  return d->num_comp == 1 ? 1 : 2;            // r32 = tier1, rgba32 = tier2
+    default: return 0;
+    }
+}
+
 void mtl_setup_formats(struct pl_gpu_t *gpu)
 {
+    id<MTLDevice> dev = mtl_device(gpu);
+    MTLReadWriteTextureTier rw_tier =
+        dev ? dev.readWriteTextureSupport : MTLReadWriteTextureTierNone;
+
     for (size_t i = 0; i < METAL_NUM_FORMATS; i++) {
         const struct mtl_fmt_desc *d = &mtl_fmts[i];
         struct pl_fmt_t *fmt = pl_alloc_obj(gpu, fmt, struct mtl_format_priv);
@@ -136,8 +159,14 @@ void mtl_setup_formats(struct pl_gpu_t *gpu)
                 if (d->type != PL_FMT_UINT && d->type != PL_FMT_SINT)
                     caps |= PL_FMT_CAP_BLENDABLE;
             }
-            if (d->storable && gpu->glsl.compute)
+            if (d->storable && gpu->glsl.compute) {
                 caps |= PL_FMT_CAP_STORABLE;
+                // Read-write access (imageLoad+imageStore on the same image) is
+                // tiered in Metal; only advertise it where the device supports it.
+                int rw = mtl_readwrite_tier(d);
+                if (rw > 0 && (int) rw_tier >= rw)
+                    caps |= PL_FMT_CAP_READWRITE;
+            }
             // Vertex use needs a plain (non-packed) layout + glsl_type; non-bgr
             // numeric only. Packed formats have no matching MTLVertexFormat.
             if (!d->bgr && d->type != PL_FMT_UINT && !packed)
@@ -145,6 +174,9 @@ void mtl_setup_formats(struct pl_gpu_t *gpu)
         }
         fmt->caps = caps;
 
+        // Storage images need a GLSL format qualifier (e.g. `layout(rgba8)`).
+        if (caps & PL_FMT_CAP_STORABLE)
+            fmt->glsl_format = pl_fmt_glsl_format(fmt, fmt->num_components);
         fmt->glsl_type = pl_var_glsl_type_name(pl_var_from_fmt(fmt, ""));
         fmt->fourcc    = pl_fmt_fourcc(fmt);
         pl_assert(fmt->glsl_type);
