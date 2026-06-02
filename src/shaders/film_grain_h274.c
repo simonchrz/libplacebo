@@ -30,7 +30,6 @@ static void prng_shift(uint32_t *state)
     *state = (x << 1) | (feedback & 1u);
 }
 
-
 static void generate_slice(float *out, size_t out_width, uint8_t h, uint8_t v,
                            int8_t grain[64][64], int16_t tmp[64][64])
 {
@@ -142,17 +141,44 @@ bool pl_needs_fg_h274(const struct pl_film_grain_params *params)
     return false;
 }
 
+// Returns true if the single intensity interval covers the full [0, 255]
+// range, i.e. the grain parameters apply unconditionally
+static bool h274_single_fullrange(const struct pl_h274_grain_data *data,
+                                  enum pl_channel c)
+{
+    return data->num_intensity_intervals[c] == 1 &&
+           data->intensity_interval_lower_bound[c][0] == 0 &&
+           data->intensity_interval_upper_bound[c][0] == 255;
+}
+
 bool pl_shader_fg_h274(pl_shader sh, pl_shader_obj *grain_state,
                        const struct pl_film_grain_params *params)
 {
     if (!sh_require(sh, PL_SHADER_SIG_NONE, params->tex->params.w, params->tex->params.h))
         return false;
 
+    const struct pl_h274_grain_data *data = &params->data.params.h274;
+
+    // Check if any active component needs intensity averaging. This can be
+    // skipped when all components have a single full-range interval.
+    bool needs_avg = false;
+    for (int idx = 0; idx < params->components; idx++) {
+        enum pl_channel c = channel_map(idx, params);
+        if (c == PL_CHANNEL_NONE)
+            continue;
+        if (!data->component_model_present[c])
+            continue;
+        if (!h274_single_fullrange(data, c)) {
+            needs_avg = true;
+            break;
+        }
+    }
+
     size_t shmem_req = 0;
     ident_t group_sum = NULL_IDENT;
 
     const struct pl_glsl_version glsl = sh_glsl(sh);
-    if (glsl.subgroup_size < 8*8) {
+    if (needs_avg && glsl.subgroup_size < 8*8) {
         group_sum = sh_fresh(sh, "group_sum");
         shmem_req += sizeof(int);
         GLSLH("shared int "$"; \n", group_sum);
@@ -197,7 +223,6 @@ bool pl_shader_fg_h274(pl_shader sh, pl_shader_obj *grain_state,
          "color = vec4("$") * texelFetch("$", pos, 0);  \n",
          SH_FLOAT(pl_color_repr_normalize(params->repr)), tex);
 
-    const struct pl_h274_grain_data *data = &params->data.params.h274;
     ident_t scale_factor = sh_var(sh, (struct pl_shader_var) {
         .var = pl_var_float("scale_factor"),
         .data = &(float){ 1.0 / (1 << (data->log2_scale_factor + 6)) },
@@ -227,41 +252,37 @@ bool pl_shader_fg_h274(pl_shader sh, pl_shader_obj *grain_state,
 
         GLSL("// component %d\n{\n", c);
 
-        // Compute the local 8x8 average
-        GLSL("float avg = color[%d] / 64.0; \n", c);
+        bool single_fullrange = h274_single_fullrange(data, c);
 
-        const int precision = 10000000;
-        if (glsl.subgroup_size) {
-            GLSL("avg = subgroupAdd(avg); \n");
+        if (!single_fullrange) {
+            // Compute the local 8x8 average
+            GLSL("float avg = color[%d] / 64.0; \n", c);
 
-            if (glsl.subgroup_size < 8*8) {
-                GLSL("if (subgroupElect())                  \n"
-                     "    atomicAdd("$", int(avg * %d.0));  \n"
-                     "barrier();                            \n"
-                     "avg = float("$") / %d.0;              \n",
+            const int precision = 10000000;
+            if (glsl.subgroup_size) {
+                GLSL("avg = subgroupAdd(avg); \n");
+
+                if (glsl.subgroup_size < 8*8) {
+                    GLSL("if (subgroupElect())                  \n"
+                         "    atomicAdd("$", int(avg * %d.0));  \n"
+                         "barrier();                            \n"
+                         "avg = float("$") / %d.0;              \n",
+                         group_sum, precision, group_sum, precision);
+                }
+            } else {
+                GLSL("atomicAdd("$", int(avg * %d.0));  \n"
+                     "barrier();                        \n"
+                     "avg = float("$") / %d.0;          \n",
                      group_sum, precision, group_sum, precision);
             }
-        } else {
-            GLSL("atomicAdd("$", int(avg * %d.0));  \n"
-                 "barrier();                        \n"
-                 "avg = float("$") / %d.0;          \n",
-                 group_sum, precision, group_sum, precision);
         }
 
-        // Hard-coded unrolled loop, to avoid having to load a dynamically
-        // sized array into the shader - and to optimize for the very common
-        // case of there only being a single intensity interval
         GLSL("uint val; \n");
-        for (int i = 0; i < data->num_intensity_intervals[c]; i++) {
-            ident_t bounds = sh_var(sh, (struct pl_shader_var) {
-                .var = pl_var_vec2("bounds"),
-                .data = &(float[2]) {
-                    data->intensity_interval_lower_bound[c][i] / 255.0,
-                    data->intensity_interval_upper_bound[c][i] / 255.0,
-                },
-            });
 
-            const uint8_t num_values = data->num_model_values[c];
+        // Hard-coded unrolled loop, to avoid having to load a dynamically
+        // sized array into the shader
+        const uint8_t num_values = data->num_model_values[c];
+        for (int i = 0; i < data->num_intensity_intervals[c]; i++) {
             uint8_t h = num_values > 1 ? data->comp_model_value[c][i][1] : 8;
             uint8_t v = num_values > 2 ? data->comp_model_value[c][i][2] : h;
             h = PL_CLAMP(h, 2, 14) - 2;
@@ -281,11 +302,24 @@ bool pl_shader_fg_h274(pl_shader sh, pl_shader_obj *grain_state,
                 },
             });
 
-            GLSL("if (avg >= "$".x && avg <= "$".y) \n"
-                 "    val = "$"; else               \n",
-                 bounds, bounds, values);
+            if (single_fullrange) {
+                GLSL("val = "$"; \n", values);
+            } else {
+                ident_t bounds = sh_var(sh, (struct pl_shader_var) {
+                    .var = pl_var_vec2("bounds"),
+                    .data = &(float[2]) {
+                        data->intensity_interval_lower_bound[c][i] / 255.0,
+                        data->intensity_interval_upper_bound[c][i] / 255.0,
+                    },
+                });
+                GLSL("if (avg >= "$".x && avg <= "$".y) \n"
+                     "    val = "$"; else               \n",
+                     bounds, bounds, values);
+            }
         }
-        GLSL("    val = 0u; \n");
+        if (!single_fullrange) {
+            GLSL("    val = 0u; \n");
+        }
 
         // Extract the grain parameters from comp_model_value
         GLSL("uvec2 offset = uvec2((val & 0xFF00u) >> 2,    \n"
