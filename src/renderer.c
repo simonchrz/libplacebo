@@ -1180,7 +1180,7 @@ hook_error:
     return ret;
 }
 
-static void hdr_update_peak(struct pass_state *pass)
+static void hdr_update_peak(struct pass_state *pass, float max_peak)
 {
     const struct pl_render_params *params = pass->params;
     pl_renderer rr = pass->rr;
@@ -1196,8 +1196,6 @@ static void hdr_update_peak(struct pass_state *pass)
     if (!rr->gpu->limits.max_ssbo_size)
         goto cleanup;
 
-    float max_peak = pl_color_transfer_nominal_peak(pass->img.color.transfer) *
-                     PL_COLOR_SDR_WHITE;
     if (pass->img.color.transfer == PL_COLOR_TRC_HLG)
         max_peak = pass->img.color.hdr.max_luma;
     if (max_peak <= pass->target.color.hdr.max_luma + 1e-6)
@@ -1993,10 +1991,12 @@ static bool pass_scale_main(struct pass_state *pass)
     struct sampler_info info = sample_src_info(pass, &src, SAMPLER_MAIN);
     bool use_sigmoid = info.dir == SAMPLER_UP && params->sigmoid_params;
     bool use_linear  = info.dir == SAMPLER_DOWN;
+    float max_peak = pl_color_transfer_nominal_peak(img->color.transfer) *
+                     PL_COLOR_SDR_WHITE;
 
     // Opportunistically update peak here if it would save performance
     if (info.dir == SAMPLER_UP)
-        hdr_update_peak(pass);
+        hdr_update_peak(pass, max_peak);
 
     // We need to enable the full rendering pipeline if there are any user
     // shaders / hooks that might depend on it.
@@ -2078,7 +2078,7 @@ static bool pass_scale_main(struct pass_state *pass)
 
 done:
     if (info.dir != SAMPLER_UP)
-        hdr_update_peak(pass);
+        hdr_update_peak(pass, max_peak);
     pass_hook(pass, img, PL_HOOK_SCALED);
     return true;
 }
