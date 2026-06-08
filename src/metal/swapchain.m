@@ -184,6 +184,45 @@ pl_tex pl_metal_wrap_tex(pl_metal metal, void *mtl_texture)
     return mtl_wrap_tex(gpu, mtex, fmt);
 }
 
+pl_tex pl_metal_wrap_iosurface(pl_metal metal, void *iosurface, int plane,
+                               int width, int height, pl_fmt fmt)
+{
+    pl_gpu gpu = metal->gpu;
+    if (!iosurface || !fmt) {
+        PL_ERR(gpu, "pl_metal_wrap_iosurface: NULL surface or format");
+        return NULL;
+    }
+    // Metal-native IOSurface import: a MTLTexture backed by one plane of an
+    // IOSurface (e.g. a CVPixelBuffer plane). Lets callers feed externally
+    // produced frames (VideoToolbox, camera, ...) into the renderer without a
+    // CPU copy — the Metal backend's counterpart to the Vulkan IOSurface import.
+    MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:mtl_fmt(fmt)
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;   // IOSurface-backed (shared on Apple GPUs)
+    id<MTLTexture> mtex = [mtl_device(gpu) newTextureWithDescriptor:desc
+                                                         iosurface:(IOSurfaceRef) iosurface
+                                                             plane:plane];
+    if (!mtex) {
+        PL_ERR(gpu, "pl_metal_wrap_iosurface: newTextureWithDescriptor:iosurface: failed");
+        return NULL;
+    }
+    struct pl_tex_t *tex = pl_zalloc_obj(NULL, tex, struct pl_tex_metal);
+    tex->params = (struct pl_tex_params) {
+        .w = width,
+        .h = height,
+        .format = fmt,
+        .sampleable = true,   // input texture sampled by the renderer
+    };
+    tex->sampler_type = PL_SAMPLER_NORMAL;
+    struct pl_tex_metal *tp = PL_PRIV(tex);
+    tp->tex = (__bridge void *) [mtex retain];   // mtl_tex_destroy releases (balanced)
+    return tex;
+}
+
 pl_swapchain pl_metal_swapchain_create(pl_gpu gpu, void *layer_ptr)
 {
     CAMetalLayer *layer = (__bridge CAMetalLayer *) layer_ptr;

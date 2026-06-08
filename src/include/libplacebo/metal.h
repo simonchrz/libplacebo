@@ -69,6 +69,17 @@ PL_API pl_swapchain pl_metal_create_swapchain(pl_metal metal,
 // Returns NULL if the texture's MTLPixelFormat has no matching pl_fmt.
 PL_API pl_tex pl_metal_wrap_tex(pl_metal metal, void *mtl_texture);
 
+// Wrap one plane of an IOSurface (e.g. `IOSurfaceRef`, bridged to void *) as a
+// sampleable pl_tex, via Metal's native `newTextureWithDescriptor:iosurface:plane:`.
+// Lets callers feed externally produced frames (VideoToolbox/CVPixelBuffer, camera)
+// into the renderer with no CPU copy — the Metal backend's counterpart to the
+// Vulkan IOSurface import (PL_HANDLE_IOSURFACE). `width`/`height` are the plane's
+// dimensions, `fmt` its libplacebo format (e.g. r8 for the luma plane, rg8 for the
+// chroma plane of an NV12 surface). Destroy with pl_tex_destroy when done; lifetime
+// is a balanced retain/release on the underlying MTLTexture. Returns NULL on failure.
+PL_API pl_tex pl_metal_wrap_iosurface(pl_metal metal, void *iosurface, int plane,
+                                      int width, int height, pl_fmt fmt);
+
 PL_API_END
 
 #endif // LIBPLACEBO_METAL_H_
