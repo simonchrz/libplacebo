@@ -33,6 +33,7 @@ static const struct pl_gpu_fns pl_fns_metal;
 void mtl_gpu_destroy(pl_gpu gpu)
 {
     struct pl_gpu_metal *p = PL_PRIV(gpu);
+    mtl_gpu_finish(gpu);   // flush + drain a possibly-open frame CB
     pl_spirv_destroy(&p->spirv);
     for (int s = 0; s < PL_TEX_SAMPLE_MODE_COUNT; s++)
         for (int a = 0; a < PL_TEX_ADDRESS_MODE_COUNT; a++)
@@ -49,23 +50,64 @@ bool mtl_gpu_is_failed(pl_gpu gpu)
     return p->failed;
 }
 
+// ---- Shared per-frame command buffer --------------------------------------
+//
+// All GPU work of a frame (passes, clears, blits) is encoded into one shared
+// command buffer instead of one CB per pass: one queue submit per frame, and
+// Metal can pipeline the encoders back-to-back. The CB is committed at
+// flush/finish, or earlier when host access must wait on in-frame work
+// (mtl_wait_pending) — waiting on an uncommitted CB would deadlock.
+
+id<MTLCommandBuffer> mtl_frame_cb(pl_gpu gpu)
+{
+    struct pl_gpu_metal *p = PL_PRIV(gpu);
+    if (!p->frame_cb) {
+        id<MTLCommandBuffer> cb = [mtl_queue(gpu) commandBuffer];
+        [cb retain];
+        p->frame_cb = (__bridge void *) cb;
+    }
+    return (__bridge id<MTLCommandBuffer>) p->frame_cb;
+}
+
+void mtl_frame_commit(pl_gpu gpu)
+{
+    struct pl_gpu_metal *p = PL_PRIV(gpu);
+    if (!p->frame_cb)
+        return;
+    id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>) p->frame_cb;
+    [cb commit];
+    [cb release];
+    p->frame_cb = NULL;
+}
+
+void mtl_wait_pending(pl_gpu gpu, void **slot)
+{
+    if (!*slot)
+        return;
+    struct pl_gpu_metal *p = PL_PRIV(gpu);
+    if (*slot == p->frame_cb)
+        mtl_frame_commit(gpu);
+    id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>) *slot;
+    [cb waitUntilCompleted];
+    [cb release];
+    *slot = NULL;
+}
+
 // Wait for all submitted GPU work to complete. Command buffers on our single
 // queue execute in commit order, so an empty cb that we wait on is done only
 // after everything committed before it.
 void mtl_gpu_finish(pl_gpu gpu)
 {
+    mtl_frame_commit(gpu);
     id<MTLCommandBuffer> cb = [mtl_queue(gpu) commandBuffer];
     [cb commit];
     [cb waitUntilCompleted];
 }
 
-// Kick off all committed work without blocking. Metal commits eagerly, so this
-// is mostly a no-op flush point; we still push an empty cb so any callers
-// relying on a submission barrier (e.g. pl_gpu_flush before a present on a
-// separate queue) get one.
+// Kick off all recorded work without blocking: commit the open frame CB.
 void mtl_gpu_flush(pl_gpu gpu)
 {
-    [[mtl_queue(gpu) commandBuffer] commit];
+    mtl_frame_commit(gpu);
 }
 
 // ---- GPU timers ----------------------------------------------------------
@@ -96,10 +138,10 @@ static pl_timer mtl_timer_create(pl_gpu gpu)
 
 static void mtl_timer_destroy(pl_gpu gpu, pl_timer t)
 {
-    (void) gpu;
-    // A completion handler may still hold `t`. These fire shortly after their
-    // command buffer completes; timers are destroyed at teardown (after the
-    // last present), so this drains immediately in practice rather than spins.
+    // A completion handler may still hold `t` — and seit dem Frame-CB-Batching
+    // kann der Handler am noch UNCOMMITTETEN frame_cb hängen (committen, sonst
+    // feuert er nie → Endlos-Spin). Danach drained der Loop wie gehabt.
+    mtl_frame_commit(gpu);
     while (atomic_load_explicit(&t->pending, memory_order_acquire))
         sched_yield();
     pl_free(t);

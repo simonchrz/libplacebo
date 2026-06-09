@@ -41,6 +41,11 @@ struct pl_gpu_metal {
     pl_spirv spirv; // GLSL → SPIR-V (shaderc/glslang); SPIR-V → MSL is ours
     // Lazily-built MTLSamplerState cache, [sample_mode][address_mode].
     void *samplers[PL_TEX_SAMPLE_MODE_COUNT][PL_TEX_ADDRESS_MODE_COUNT];
+    // Shared per-frame command buffer (+1 retained, NULL when none open).
+    // All passes/clears/blits encode into this one CB; it is committed at
+    // flush/finish (and lazily whenever host access must wait on it). One
+    // submit per frame instead of one per pass.
+    void *frame_cb; // id<MTLCommandBuffer> or NULL
     bool failed;
 };
 
@@ -104,6 +109,16 @@ void    mtl_setup_formats(struct pl_gpu_t *gpu);
 // Retain `cb` into *slot, releasing whatever was there (gpu_tex.m). Used to
 // mark an object as having in-flight GPU work that readback must wait on.
 void    mtl_set_pending(void **slot, id<MTLCommandBuffer> cb);
+
+// The shared per-frame command buffer: lazily opened on first use (gpu.m).
+id<MTLCommandBuffer> mtl_frame_cb(pl_gpu gpu);
+// Commit + release the open frame CB, if any. The flush/finish entry points
+// and any host access that must wait on in-frame work call this first —
+// waiting on an uncommitted CB would deadlock.
+void    mtl_frame_commit(pl_gpu gpu);
+// Commit-aware pending-wait: commits the frame CB first if *slot refers to it,
+// then waits for completion and clears the slot. No-op when *slot is NULL.
+void    mtl_wait_pending(pl_gpu gpu, void **slot);
 
 // pl_gpu_fns slot implementations (defined across gpu.m / gpu_tex.m / gpu_pass.m).
 void    mtl_gpu_destroy(pl_gpu);

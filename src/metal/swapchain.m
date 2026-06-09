@@ -140,11 +140,20 @@ static void mtl_sw_swap_buffers(pl_swapchain sw)
         return;
     id<CAMetalDrawable> drawable = (__bridge id<CAMetalDrawable>) p->drawable;
 
-    // Present on the queue, after the render command buffers (committed earlier
-    // on the same queue) complete.
-    id<MTLCommandBuffer> cb = [mtl_queue(sw->gpu) commandBuffer];
-    [cb presentDrawable:drawable];
-    [cb commit];
+    // Mit dem geteilten Frame-CB hängt das Rendering dieses Frames ggf. noch
+    // uncommitted im frame_cb — den Present DARAN anhängen und committen
+    // (ein CB pro Frame, Present korrekt nach dem Rendering geordnet).
+    // Ohne offenen Frame-CB (Rendering schon geflusht): eigener Present-CB,
+    // Queue-Reihenfolge ordnet ihn hinter die committeten Render-CBs.
+    struct pl_gpu_metal *pg = PL_PRIV(sw->gpu);
+    if (pg->frame_cb) {
+        [(__bridge id<MTLCommandBuffer>) pg->frame_cb presentDrawable:drawable];
+        mtl_frame_commit(sw->gpu);
+    } else {
+        id<MTLCommandBuffer> cb = [mtl_queue(sw->gpu) commandBuffer];
+        [cb presentDrawable:drawable];
+        [cb commit];
+    }
 
     pl_tex_destroy(sw->gpu, &p->fbo);
     [drawable release];

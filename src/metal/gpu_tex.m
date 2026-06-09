@@ -34,6 +34,8 @@
 #include "gpu.h"
 
 // Retain `cb` into *slot, releasing whatever was there. cb may be nil.
+// (The commit-aware wait counterpart, mtl_wait_pending, lives in gpu.m — it
+// needs the gpu handle to commit the shared frame CB before waiting on it.)
 void mtl_set_pending(void **slot, id<MTLCommandBuffer> cb)
 {
     if (*slot)
@@ -41,16 +43,6 @@ void mtl_set_pending(void **slot, id<MTLCommandBuffer> cb)
     *slot = (__bridge void *) cb;
     if (cb)
         [cb retain];
-}
-
-static void mtl_wait_pending(void **slot)
-{
-    if (!*slot)
-        return;
-    id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>) *slot;
-    [cb waitUntilCompleted];
-    [cb release];
-    *slot = NULL;
 }
 
 static int tex_dimensions(const struct pl_tex_params *p)
@@ -63,7 +55,7 @@ static int tex_dimensions(const struct pl_tex_params *p)
 void mtl_buf_destroy(pl_gpu gpu, pl_buf buf)
 {
     struct pl_buf_metal *bp = PL_PRIV(buf);
-    mtl_wait_pending(&bp->pending_cb);
+    mtl_wait_pending(gpu, &bp->pending_cb);
     if (bp->buf)
         [(__bridge id<MTLBuffer>) bp->buf release];
     pl_free((void *) buf);
@@ -114,7 +106,7 @@ bool mtl_buf_read(pl_gpu gpu, pl_buf buf, size_t offset,
                     void *dest, size_t size)
 {
     struct pl_buf_metal *bp = PL_PRIV(buf);
-    mtl_wait_pending(&bp->pending_cb);
+    mtl_wait_pending(gpu, &bp->pending_cb);
     id<MTLBuffer> mbuf = (__bridge id<MTLBuffer>) bp->buf;
     memcpy(dest, (uint8_t *) [mbuf contents] + offset, size);
     (void) gpu;
@@ -126,7 +118,7 @@ void mtl_buf_copy(pl_gpu gpu, pl_buf dst, size_t dst_offset,
 {
     struct pl_buf_metal *sp = PL_PRIV(src);
     struct pl_buf_metal *dp = PL_PRIV(dst);
-    mtl_wait_pending(&sp->pending_cb);
+    mtl_wait_pending(gpu, &sp->pending_cb);
     id<MTLBuffer> s = (__bridge id<MTLBuffer>) sp->buf;
     id<MTLBuffer> d = (__bridge id<MTLBuffer>) dp->buf;
     memcpy((uint8_t *) [d contents] + dst_offset,
@@ -139,17 +131,20 @@ bool mtl_buf_poll(pl_gpu gpu, pl_buf buf, uint64_t timeout)
     struct pl_buf_metal *bp = PL_PRIV(buf);
     if (!bp->pending_cb)
         return false;
+    if (timeout > 0) {
+        // Blocking poll — commit-aware (waiting on the still-open frame CB
+        // would deadlock).
+        mtl_wait_pending(gpu, &bp->pending_cb);
+        return false;
+    }
     id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>) bp->pending_cb;
-    if (timeout > 0)
-        [cb waitUntilCompleted];
     MTLCommandBufferStatus st = cb.status;
     if (st == MTLCommandBufferStatusCompleted || st == MTLCommandBufferStatusError) {
         [cb release];
         bp->pending_cb = NULL;
         return false;
     }
-    (void) gpu;
-    return true;   // still in flight
+    return true;   // still in flight (incl. recorded-but-uncommitted frame CB)
 }
 
 // --------------------------------------------------------------- textures
@@ -157,7 +152,7 @@ bool mtl_buf_poll(pl_gpu gpu, pl_buf buf, uint64_t timeout)
 void mtl_tex_destroy(pl_gpu gpu, pl_tex tex)
 {
     struct pl_tex_metal *tp = PL_PRIV(tex);
-    mtl_wait_pending(&tp->pending_cb);
+    mtl_wait_pending(gpu, &tp->pending_cb);
     if (tp->tex)
         [(__bridge id<MTLTexture>) tp->tex release];
     pl_free((void *) tex);
@@ -255,7 +250,7 @@ bool mtl_tex_upload(pl_gpu gpu, const struct pl_tex_transfer_params *params)
 
     // Make sure any in-flight GPU writes to this texture are visible before we
     // overwrite its backing store from the CPU.
-    mtl_wait_pending(&tp->pending_cb);
+    mtl_wait_pending(gpu, &tp->pending_cb);
 
     size_t row_pitch, img_pitch;
     xfer_pitches(params, dims, &row_pitch, &img_pitch);
@@ -263,7 +258,7 @@ bool mtl_tex_upload(pl_gpu gpu, const struct pl_tex_transfer_params *params)
     const uint8_t *src;
     if (params->buf) {
         struct pl_buf_metal *bp = PL_PRIV(params->buf);
-        mtl_wait_pending(&bp->pending_cb);
+        mtl_wait_pending(gpu, &bp->pending_cb);
         src = (uint8_t *) [(__bridge id<MTLBuffer>) bp->buf contents] + params->buf_offset;
     } else {
         src = params->ptr;
@@ -296,7 +291,7 @@ bool mtl_tex_download(pl_gpu gpu, const struct pl_tex_transfer_params *params)
     id<MTLTexture> mtex = (__bridge id<MTLTexture>) tp->tex;
     int dims = tex_dimensions(&tex->params);
 
-    mtl_wait_pending(&tp->pending_cb);   // ensure GPU writes landed
+    mtl_wait_pending(gpu, &tp->pending_cb);   // ensure GPU writes landed
 
     size_t row_pitch, img_pitch;
     xfer_pitches(params, dims, &row_pitch, &img_pitch);
@@ -304,7 +299,7 @@ bool mtl_tex_download(pl_gpu gpu, const struct pl_tex_transfer_params *params)
     uint8_t *dst;
     if (params->buf) {
         struct pl_buf_metal *bp = PL_PRIV(params->buf);
-        mtl_wait_pending(&bp->pending_cb);
+        mtl_wait_pending(gpu, &bp->pending_cb);
         dst = (uint8_t *) [(__bridge id<MTLBuffer>) bp->buf contents] + params->buf_offset;
     } else {
         dst = params->ptr;
@@ -344,10 +339,9 @@ void mtl_tex_clear_ex(pl_gpu gpu, pl_tex tex, const union pl_clear_color color)
     rpd.colorAttachments[0].clearColor =
         MTLClearColorMake(color.f[0], color.f[1], color.f[2], color.f[3]);
 
-    id<MTLCommandBuffer> cb = [mtl_queue(gpu) commandBuffer];
+    id<MTLCommandBuffer> cb = mtl_frame_cb(gpu);
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rpd];
     [enc endEncoding];
-    [cb commit];
     mtl_set_pending(&tp->pending_cb, cb);
 }
 
@@ -370,9 +364,14 @@ void mtl_tex_blit(pl_gpu gpu, const struct pl_tex_blit_params *params)
         return;
     }
 
-    mtl_wait_pending(&sp->pending_cb);
+    // Quelle muss fertig geschrieben sein. Innerhalb des offenen Frame-CB ist
+    // die Reihenfolge Encoder-seitig garantiert (gleicher CB) — nur fremde,
+    // bereits committete CBs brauchen den Wait.
+    struct pl_gpu_metal *pg = PL_PRIV(gpu);
+    if (sp->pending_cb && sp->pending_cb != pg->frame_cb)
+        mtl_wait_pending(gpu, &sp->pending_cb);
 
-    id<MTLCommandBuffer> cb = [mtl_queue(gpu) commandBuffer];
+    id<MTLCommandBuffer> cb = mtl_frame_cb(gpu);
     id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder];
     [enc copyFromTexture:s
              sourceSlice:0
@@ -388,6 +387,5 @@ void mtl_tex_blit(pl_gpu gpu, const struct pl_tex_blit_params *params)
                                        PL_MIN(dst_rc.y0, dst_rc.y1),
                                        PL_MIN(dst_rc.z0, dst_rc.z1))];
     [enc endEncoding];
-    [cb commit];
     mtl_set_pending(&dp->pending_cb, cb);
 }

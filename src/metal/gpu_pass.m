@@ -493,7 +493,8 @@ static void mtl_bind_desc(pl_gpu gpu, id<MTLRenderCommandEncoder> renc,
     switch (desc->type) {
     case PL_DESC_SAMPLED_TEX: {
         pl_tex tex = db->object;
-        id<MTLTexture> mt = (__bridge id<MTLTexture>) ((struct pl_tex_metal *) PL_PRIV(tex))->tex;
+        struct pl_tex_metal *tp = PL_PRIV(tex);
+        id<MTLTexture> mt = (__bridge id<MTLTexture>) tp->tex;
         id<MTLSamplerState> samp = mtl_get_sampler(gpu, db->sample_mode, db->address_mode);
         if (renc) {
             [renc setFragmentTexture:mt atIndex:slot];
@@ -502,6 +503,10 @@ static void mtl_bind_desc(pl_gpu gpu, id<MTLRenderCommandEncoder> renc,
             [cenc setTexture:mt atIndex:slot];
             [cenc setSamplerState:samp atIndex:slot];
         }
+        // Auch LESE-Bindings tracken: replaceRegion/Host-Writes auf eine noch
+        // in-flight gesampelte Textur wären ein Hazard. Der Wait ist nach dem
+        // Frame-Commit praktisch gratis (CB längst fertig).
+        mtl_set_pending(&tp->pending_cb, cb);
         break;
     }
     case PL_DESC_STORAGE_IMG: {
@@ -521,8 +526,11 @@ static void mtl_bind_desc(pl_gpu gpu, id<MTLRenderCommandEncoder> renc,
         id<MTLBuffer> mb = (__bridge id<MTLBuffer>) bp->buf;
         if (renc) [renc setFragmentBuffer:mb offset:0 atIndex:slot];
         else      [cenc setBuffer:mb offset:0 atIndex:slot];
-        if (desc->type == PL_DESC_BUF_STORAGE)
-            mtl_set_pending(&bp->pending_cb, cb);
+        // Uniform-Buffer ebenfalls tracken (Read-Binding): pl_dispatch pollt
+        // vor dem Recycling — ohne Tracking würde ein noch referenzierter
+        // Buffer per CPU-memcpy überschrieben (Shared-Storage liest zur
+        // AUSFÜHRUNGS-Zeit, nicht zur Encode-Zeit).
+        mtl_set_pending(&bp->pending_cb, cb);
         break;
     }
     default:
@@ -535,7 +543,9 @@ void mtl_pass_run(pl_gpu gpu, const struct pl_pass_run_params *params)
 {
     pl_pass pass = params->pass;
     struct pl_pass_metal *pm = PL_PRIV(pass);
-    id<MTLCommandBuffer> cb = [mtl_queue(gpu) commandBuffer];
+    // Alle Passes eines Frames encoden in den geteilten Frame-CB (ein Submit
+    // pro Frame statt pro Pass); committed wird in flush/finish.
+    id<MTLCommandBuffer> cb = mtl_frame_cb(gpu);
 
     if (pass->params.type == PL_PASS_RASTER) {
         struct pl_tex_metal *tt = PL_PRIV(params->target);
@@ -644,6 +654,7 @@ void mtl_pass_run(pl_gpu gpu, const struct pl_pass_run_params *params)
         [enc endEncoding];
     }
 
+    // NB: mit dem geteilten Frame-CB liefern GPU-Timer Frame- statt Pass-
+    // Granularität (GPUStartTime/GPUEndTime gelten pro CB).
     mtl_timer_attach(params->timer, cb);
-    [cb commit];
 }
