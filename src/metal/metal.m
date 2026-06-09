@@ -48,7 +48,16 @@ pl_metal pl_metal_create(pl_log log, const struct pl_metal_params *params)
         return NULL;
     }
 
-    id<MTLCommandQueue> queue = [dev newCommandQueue]; // +1
+    id<MTLCommandQueue> queue;
+    if (params->queue) {
+        // Vom Host geteilte Queue: Submissions des Hosts (z.B. Readback-Blit,
+        // presentDrawable nach pl_gpu_flush) ordnen sich automatisch hinter
+        // unser Frame-CB — keine Events/CPU-Waits nötig.
+        queue = (__bridge id<MTLCommandQueue>) params->queue;
+        [queue retain];                     // +1, symmetrisch zum Create-Pfad
+    } else {
+        queue = [dev newCommandQueue];      // +1
+    }
     if (!queue) {
         pl_err(log, "Metal: failed creating command queue");
         [dev release];

@@ -38,6 +38,14 @@ struct pl_metal_params {
     // An existing id<MTLDevice> to use (bridged to void *). If NULL, the
     // system default device (MTLCreateSystemDefaultDevice) is used.
     void *device;
+
+    // Optional existing id<MTLCommandQueue> to submit all GPU work on
+    // (bridged to void *). If NULL, a new queue is created from `device`.
+    // Sharing the host app's queue gives automatic submission ordering
+    // between libplacebo's rendering and host work (e.g. readback blits or
+    // a presentDrawable encoded by the host after pl_gpu_flush) — no
+    // events or CPU-side waits needed.
+    void *queue;
 };
 
 #define pl_metal_params(...) (&(struct pl_metal_params) { __VA_ARGS__ })

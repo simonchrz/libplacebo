@@ -55,7 +55,12 @@ static int tex_dimensions(const struct pl_tex_params *p)
 void mtl_buf_destroy(pl_gpu gpu, pl_buf buf)
 {
     struct pl_buf_metal *bp = PL_PRIV(buf);
-    mtl_wait_pending(gpu, &bp->pending_cb);
+    // KEIN Completion-Wait: ein Command-Buffer retained alle referenzierten
+    // Ressourcen bis zu seinem Abschluss — unser Release hier zerstört den
+    // MTLBuffer nicht, solange er noch in flight ist. Nur den Pending-Ref
+    // freigeben (ohne zu warten — wäre sonst ein Per-Frame-Stall, sobald der
+    // Host ohne pl_gpu_finish arbeitet).
+    mtl_set_pending(&bp->pending_cb, nil);
     if (bp->buf)
         [(__bridge id<MTLBuffer>) bp->buf release];
     pl_free((void *) buf);
@@ -152,7 +157,12 @@ bool mtl_buf_poll(pl_gpu gpu, pl_buf buf, uint64_t timeout)
 void mtl_tex_destroy(pl_gpu gpu, pl_tex tex)
 {
     struct pl_tex_metal *tp = PL_PRIV(tex);
-    mtl_wait_pending(gpu, &tp->pending_cb);
+    // KEIN Completion-Wait (s. mtl_buf_destroy): der CB retained die Textur
+    // (und bei IOSurface-Wraps die Surface via Use-Count) bis zum Abschluss.
+    // Load-bearing für den No-finish-Pfad: render_pl zerstört das gewrappte
+    // Drawable-Target direkt nach dem Flush — ein Wait hier wäre der volle
+    // GPU-Frame-Stall, den wir gerade entfernen.
+    mtl_set_pending(&tp->pending_cb, nil);
     if (tp->tex)
         [(__bridge id<MTLTexture>) tp->tex release];
     pl_free((void *) tex);
