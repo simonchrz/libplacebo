@@ -17,9 +17,12 @@
 
 /* Metal GPU backend — textures + buffers.
  *
- * Storage model: Apple unified memory. Textures and buffers both use
- * MTLStorageModeShared, so host transfers are direct CPU memcpy /
- * replaceRegion / getBytes — no staging buffer, no blit for uploads.
+ * Storage model: Apple unified memory. Host-accessed textures (host_writable/
+ * host_readable/initial_data) and all buffers use MTLStorageModeShared, so
+ * host transfers are direct CPU memcpy / replaceRegion / getBytes — no staging
+ * buffer, no blit for uploads. GPU-only textures (renderer intermediates) use
+ * MTLStorageModePrivate so they stay eligible for Apple's lossless texture
+ * compression (Shared disables it → uncompressed bandwidth on every pass).
  * Command buffers only enter the picture once render passes write textures
  * (Phase 5); a per-object pending command buffer is waited on before readback.
  *
@@ -179,7 +182,16 @@ pl_tex mtl_tex_create(pl_gpu gpu, const struct pl_tex_params *params)
     desc.height = PL_MAX(params->h, 1);
     desc.depth  = PL_MAX(params->d, 1);
     desc.mipmapLevelCount = 1;
-    desc.storageMode = MTLStorageModeShared;   // unified memory: host-visible
+    // GPU-only textures use Private storage: on Apple GPUs, host-visible
+    // (Shared) textures are ineligible for lossless texture compression, so
+    // every intermediate FBO the renderer creates would be written and
+    // re-sampled uncompressed — pure bandwidth waste. Only textures the host
+    // actually touches (uploads via replaceRegion, downloads via getBytes,
+    // creation-time initial_data) need Shared.
+    bool host_access = params->host_writable || params->host_readable ||
+                       params->initial_data;
+    desc.storageMode = host_access ? MTLStorageModeShared
+                                   : MTLStorageModePrivate;
 
     MTLTextureUsage usage = 0;
     if (params->sampleable)
