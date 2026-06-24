@@ -198,7 +198,13 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
     bool from_cache = false;
     if (cache) {
         uint64_t key = CACHE_KEY_METAL_MSL;
+#ifndef KK_AOT
+        // Unter KK_AOT ist shaderc entfernt -> p->spirv == NULL. Die Signatur ist
+        // nur ein Cache-Invalidierungs-Guard (shaderc-Version); bei eingefrorenem
+        // AOT-Toolchain unnötig. Capture MUSS dasselbe Schema nutzen (also auch
+        // ohne Signatur erfasst werden), damit die Keys matchen.
         pl_hash_merge(&key, p->spirv->signature);
+#endif
         pl_hash_merge(&key, pl_str0_hash(glsl));
         pl_hash_merge(&key, msl_version);   // OS-dependent MSL target
         obj.key = key;
@@ -211,6 +217,13 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
     }
 
     if (!msl) {
+#ifdef KK_AOT
+    // AOT-Build: shaderc/spirv-cross sind entfernt. Ein Cache-Miss ist fatal —
+    // der vorkompilierte MSL-Cache muss alle benötigten Shader enthalten.
+    PL_ERR(gpu, "metal: KK_AOT build hat keinen Shader-Compiler — Shader fehlt im Cache "
+           "(GLSL hash 0x%"PRIx64")", pl_str0_hash(glsl));
+    return false;
+#else
     // GLSL → SPIR-V (libplacebo)
     _t = pl_clock_now();
     st->spv = pl_spirv_compile_glsl(p->spirv, tmp, gpu->glsl, stage_type, glsl);
@@ -316,6 +329,7 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
             st->sc_compiler, SpvExecutionModeLocalSize, i);
     msl = st->msl;
     cross_ms = pl_clock_diff(pl_clock_now(), _t) * 1e3;
+#endif // KK_AOT
     }  // end cache-miss transpile
 
     // MSL → MTLLibrary → MTLFunction("main0")
@@ -341,15 +355,23 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
         return false;
     }
 
-    // Persist [threadgroup dims][NUL-terminated MSL] for the next launch.
-    if (cache && !from_cache) {
-        size_t msl_size = strlen(msl) + 1;
-        pl_cache_obj_resize(NULL, &obj, sizeof(st->tg) + msl_size);
-        if (obj.data) {
-            memcpy(obj.data, st->tg, sizeof(st->tg));
-            memcpy((uint8_t *) obj.data + sizeof(st->tg), msl, msl_size);
-            pl_cache_set(cache, &obj);   // takes ownership of obj.data
+    // Persist [threadgroup dims][NUL-terminated MSL].
+    // WICHTIG: pl_cache_get ist ein "take" (entfernt den Eintrag, cache.h:201).
+    // Auf einem HIT muss das geladene Objekt RE-INSERTED werden, sonst verbraucht
+    // jeder Lookup den Cache -> über Player-Sessions verlustig (Warm-Launch
+    // recompiliert) UND für KK_AOT fatal (wiederholte Lookups ohne Compiler).
+    // Darum: Miss -> Blob bauen; Hit -> obj trägt schon die Daten; beide (re)setzen.
+    if (cache) {
+        if (!from_cache) {
+            size_t msl_size = strlen(msl) + 1;
+            pl_cache_obj_resize(NULL, &obj, sizeof(st->tg) + msl_size);
+            if (obj.data) {
+                memcpy(obj.data, st->tg, sizeof(st->tg));
+                memcpy((uint8_t *) obj.data + sizeof(st->tg), msl, msl_size);
+            }
         }
+        if (obj.data)
+            pl_cache_set(cache, &obj);   // (re)insert -> Cache bleibt persistent
     }
     pl_cache_obj_free(&obj);             // no-op after set; frees the loaded blob on hit
 
