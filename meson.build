@@ -460,6 +460,10 @@ if host_machine.system() == 'windows'
     subdir('win32')
 endif
 
+if get_option('kk-aot')
+  add_project_arguments('-DKK_AOT', language: ['c', 'cpp', 'objc'])
+endif
+
 add_project_arguments(build_opts + c_opts, language: ['c'])
 add_project_arguments(build_opts, language: ['c', 'cpp'])
 add_project_link_arguments(link_args, language: ['c', 'cpp'])

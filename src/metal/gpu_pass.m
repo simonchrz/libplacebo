@@ -144,7 +144,9 @@ static void mtl_stage_uninit(struct mtl_shader_stage *st)
     st->function = nil;
     st->library  = nil;
     if (st->sc_ctx) {                       // also frees sc_compiler + msl
-        spvc_context_destroy(st->sc_ctx);
+#ifndef KK_AOT
+        spvc_context_destroy(st->sc_ctx);   // KK_AOT: sc_ctx stets NULL -> Symbol-Ref weg
+#endif
         st->sc_ctx = NULL;
         st->sc_compiler = NULL;
         st->msl = NULL;
@@ -198,15 +200,17 @@ static bool mtl_compile_stage(pl_gpu gpu, void *tmp,
     bool from_cache = false;
     if (cache) {
         uint64_t key = CACHE_KEY_METAL_MSL;
-#ifndef KK_AOT
-        // Unter KK_AOT ist shaderc entfernt -> p->spirv == NULL. Die Signatur ist
-        // nur ein Cache-Invalidierungs-Guard (shaderc-Version); bei eingefrorenem
-        // AOT-Toolchain unnötig. Capture MUSS dasselbe Schema nutzen (also auch
-        // ohne Signatur erfasst werden), damit die Keys matchen.
-        pl_hash_merge(&key, p->spirv->signature);
-#endif
+        // Key = NUR der GLSL-Hash. Bewusst NICHT enthalten:
+        // - shaderc-Signatur: Invalidierungs-Guard für shaderc-Versionswechsel,
+        //   unter KK_AOT eh weg + Capture(mit-Compiler)/Runtime(ohne) müssen
+        //   byte-gleiche Keys liefern.
+        // - msl_version: WÜRDE den geshippten AOT-Cache bei jedem iOS-Major-Update
+        //   invalidieren (mtl_msl_version steigt -> alle Misses -> schwarz, kein
+        //   Compiler zur Erholung). Unnötig, weil der Cache MSL-QUELLTEXT speichert
+        //   und der OS-Metal-Treiber die finale Kompilierung macht — MSL ist
+        //   vorwärtskompatibel, ein neuer Treiber akzeptiert die ältere Quelle.
+        //   (spvc-Target bleibt die Capture-Zeit-Version; alle Geräte >= dieser.)
         pl_hash_merge(&key, pl_str0_hash(glsl));
-        pl_hash_merge(&key, msl_version);   // OS-dependent MSL target
         obj.key = key;
         // Blob layout: [3 × uint (threadgroup dims)][NUL-terminated MSL].
         if (pl_cache_get(cache, &obj) && obj.size > sizeof(st->tg)) {

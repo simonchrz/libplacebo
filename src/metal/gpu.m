@@ -34,7 +34,9 @@ void mtl_gpu_destroy(pl_gpu gpu)
 {
     struct pl_gpu_metal *p = PL_PRIV(gpu);
     mtl_gpu_finish(gpu);   // flush + drain a possibly-open frame CB
+#ifndef KK_AOT
     pl_spirv_destroy(&p->spirv);
+#endif
     for (int s = 0; s < PL_TEX_SAMPLE_MODE_COUNT; s++)
         for (int a = 0; a < PL_TEX_ADDRESS_MODE_COUNT; a++)
             if (p->samplers[s][a])
@@ -258,9 +260,12 @@ pl_gpu pl_gpu_create_metal(pl_log log, void *mtl_device, void *mtl_queue)
     lim->max_dispatch[1]        = 65535;
     lim->max_dispatch[2]        = 65535;
 
+#ifndef KK_AOT
     // GLSL → SPIR-V compiler (shaderc/glslang). We cross-compile the SPIR-V to
     // MSL ourselves via SPIRV-Cross in gpu_pass.m. SPIR-V 1.3 is broadly
     // supported by SPIRV-Cross's MSL backend.
+    // KK_AOT: kein Runtime-Compiler -> p->spirv bleibt NULL (nur vorkompilierter
+    // MSL-Cache); shaderc/glslang werden so aus dem Link gestrippt.
     uint32_t spv_ver = PL_SPV_VERSION(1, 3);
     p->spirv = pl_spirv_create(log, (struct pl_spirv_version) {
         .env_version = pl_spirv_version_to_vulkan(spv_ver),
@@ -271,6 +276,7 @@ pl_gpu pl_gpu_create_metal(pl_log log, void *mtl_device, void *mtl_queue)
         mtl_gpu_destroy(gpu);
         return NULL;
     }
+#endif
 
     mtl_setup_formats(gpu);
 

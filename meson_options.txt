@@ -59,3 +59,6 @@ option('xxhash', type: 'feature', value: 'auto',
 
 option('debug-abort', type: 'boolean', value: false,
        description: 'abort() on most runtime errors (only for debugging purposes)')
+
+option('kk-aot', type: 'boolean', value: false,
+       description: 'Kuckuck AOT: drop runtime shaderc/SPIRV-Cross; render only from a precompiled MSL cache')
