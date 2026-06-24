@@ -537,7 +537,11 @@ static pl_tex _img_tex(struct pass_state *pass, struct img *img, pl_debug_tag ta
     if (!ok) {
         PL_ERR(rr, "%s", PL_DEF(err_msg, "Failed dispatching intermediate pass!"));
         rr->errors |= err_enum;
-        img->sh = pl_dispatch_begin(rr->dp);
+        // KK: KEIN pl_dispatch_begin hier — pl_dispatch_finish hat img->sh schon
+        // konsumiert (=NULL). Ein neues sh würde img->sh UND img->tex gleichzeitig
+        // setzen -> img_sh()-Invariante (genau eins) verletzt -> abort()/Crash, wenn
+        // ein Dispatch fehlschlägt (z.B. AOT-Cache-Miss). So bleibt der Fehlerzustand
+        // konsistent (tex-only) -> Frame degradiert graceful statt Crash.
         img->tex = err_tex;
         return img->tex;
     }
@@ -1879,7 +1883,16 @@ static bool pass_read_image(struct pass_state *pass)
             }
 
             sub = sh_subpass(sh, img_sh(pass, &st->img));
-            pl_assert(sub);
+            if (!sub) {
+                // sh_subpass kann auch nach Materialisierung NULL liefern (z.B.
+                // Merge-/Ressourcen-Kante auf dem Metal-Backend bei bestimmten
+                // Plane-Configs). Früher pl_assert -> abort()/Crash; stattdessen
+                // den Frame graceful überspringen (kein App-Crash, nur 1 Frame weg).
+                PL_ERR(rr, "Failed merging plane subpass after materialization; "
+                       "skipping frame");
+                pl_dispatch_abort(rr->dp, &sh);
+                return false;
+            }
         }
 
         GLSL("tmp = vec4("$") * "$"(); \n", SH_FLOAT(src.scale), sub);
